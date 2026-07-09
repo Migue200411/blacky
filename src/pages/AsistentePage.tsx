@@ -1300,20 +1300,39 @@ function FieldButtons<T extends string | number>({ label, value, options, onChan
 }
 
 function FieldNumber({ label, value, min, max, onChange, disabled }: { label: string; value: number; min?: number; max?: number; onChange: (n: number) => void; disabled?: boolean }) {
+  const [text, setText] = useState<string>(String(value))
+  // Sync from outside changes (e.g. a preset button) unless the user is mid-edit.
+  useEffect(() => {
+    setText(String(value))
+  }, [value])
+
+  function commit() {
+    if (text.trim() === '') {
+      setText(String(value))
+      return
+    }
+    const n = parseFloat(text)
+    if (!Number.isFinite(n)) {
+      setText(String(value))
+      return
+    }
+    const clamped = Math.max(min ?? -Infinity, Math.min(max ?? Infinity, n))
+    setText(String(clamped))
+    if (clamped !== value) onChange(clamped)
+  }
+
   return (
     <div>
       <div className="label mb-1">{label}</div>
       <input
-        type="number"
-        value={value}
-        min={min}
-        max={max}
+        type="text"
+        inputMode="decimal"
+        pattern="[0-9]*[.,]?[0-9]*"
+        value={text}
         disabled={disabled}
-        onChange={(e) => {
-          const n = parseFloat(e.target.value || '0')
-          if (!Number.isFinite(n)) return
-          onChange(Math.max(min ?? -Infinity, Math.min(max ?? Infinity, n)))
-        }}
+        onChange={(e) => setText(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); (e.target as HTMLInputElement).blur() } }}
         className="w-full bg-black/40 rounded px-2 py-1 border border-white/10 text-sm tabular-nums disabled:opacity-40"
       />
     </div>

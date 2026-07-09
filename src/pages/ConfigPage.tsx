@@ -1,7 +1,53 @@
+import { useEffect, useState } from 'react'
 import { useStore } from '../store/useStore'
 import type { DoubleRule, Rounding, SurrenderRule, TableRules } from '../types'
 import { Link } from 'react-router-dom'
 import { DEFAULT_BET_RAMP } from '../data/defaults'
+
+/** Number input that only clamps/commits on blur so users can freely edit
+ *  (backspace, clear, retype) without losing keystrokes to min/max snapping. */
+function NumberInput({
+  value,
+  min,
+  max,
+  step,
+  disabled,
+  className = '',
+  onCommit
+}: {
+  value: number
+  min?: number
+  max?: number
+  step?: number
+  disabled?: boolean
+  className?: string
+  onCommit: (n: number) => void
+}) {
+  const [text, setText] = useState(String(value))
+  useEffect(() => { setText(String(value)) }, [value])
+  function commit() {
+    if (text.trim() === '') { setText(String(value)); return }
+    const n = parseFloat(text)
+    if (!Number.isFinite(n)) { setText(String(value)); return }
+    const clamped = Math.max(min ?? -Infinity, Math.min(max ?? Infinity, n))
+    setText(String(clamped))
+    if (clamped !== value) onCommit(clamped)
+  }
+  return (
+    <input
+      type="text"
+      inputMode="decimal"
+      pattern="[0-9]*[.,]?[0-9]*"
+      value={text}
+      disabled={disabled}
+      step={step}
+      onChange={(e) => setText(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); (e.target as HTMLInputElement).blur() } }}
+      className={className}
+    />
+  )
+}
 
 function Row({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
   return (
@@ -107,18 +153,13 @@ export function ConfigPage() {
             ))}
             <label className="text-xs flex items-center gap-1">
               <span className="text-white/60">Personalizada</span>
-              <input
-                type="number"
+              <NumberInput
+                value={Math.round(rules.penetration * 100)}
                 min={10}
                 max={95}
-                step={5}
                 disabled={rules.shuffleType === 'csm'}
-                value={Math.round(rules.penetration * 100)}
-                onChange={(e) => {
-                  const v = Math.max(10, Math.min(95, parseInt(e.target.value || '75', 10)))
-                  set('penetration', v / 100)
-                }}
-                className="bg-black/40 rounded px-2 py-0.5 border border-white/10 w-16"
+                onCommit={(v) => set('penetration', v / 100)}
+                className="bg-black/40 rounded px-2 py-0.5 border border-white/10 w-16 text-sm"
               />%
             </label>
           </div>
@@ -135,13 +176,12 @@ export function ConfigPage() {
                 {n}
               </button>
             ))}
-            <input
-              type="number"
+            <NumberInput
+              value={rules.burnCards}
               min={0}
               max={52}
-              value={rules.burnCards}
-              onChange={(e) => set('burnCards', Math.max(0, Math.min(52, parseInt(e.target.value || '0', 10))))}
-              className="bg-black/40 rounded px-2 py-0.5 border border-white/10 w-16"
+              onCommit={(v) => set('burnCards', v)}
+              className="bg-black/40 rounded px-2 py-0.5 border border-white/10 w-16 text-sm"
             />
           </div>
         </Row>
@@ -214,20 +254,24 @@ export function ConfigPage() {
       <section className="card-panel p-4">
         <div className="font-display text-lg mb-2">Bankroll y apuestas simuladas</div>
         <Row label="Bankroll inicial">
-          <input type="number" className="bg-black/40 rounded px-3 py-1.5 border border-white/10 w-40" value={rules.bankroll}
-            onChange={(e) => set('bankroll', Math.max(0, parseInt(e.target.value || '0', 10)))} />
+          <NumberInput value={rules.bankroll} min={0}
+            onCommit={(v) => set('bankroll', v)}
+            className="bg-black/40 rounded px-3 py-1.5 border border-white/10 w-40 text-sm" />
         </Row>
         <Row label="Mesa mínima / máxima">
           <div className="flex gap-2">
-            <input type="number" className="bg-black/40 rounded px-3 py-1.5 border border-white/10 w-28" value={rules.minBet}
-              onChange={(e) => set('minBet', Math.max(1, parseInt(e.target.value || '1', 10)))} />
-            <input type="number" className="bg-black/40 rounded px-3 py-1.5 border border-white/10 w-28" value={rules.maxBet}
-              onChange={(e) => set('maxBet', Math.max(rules.minBet, parseInt(e.target.value || '1', 10)))} />
+            <NumberInput value={rules.minBet} min={1}
+              onCommit={(v) => set('minBet', v)}
+              className="bg-black/40 rounded px-3 py-1.5 border border-white/10 w-28 text-sm" />
+            <NumberInput value={rules.maxBet} min={rules.minBet}
+              onCommit={(v) => set('maxBet', v)}
+              className="bg-black/40 rounded px-3 py-1.5 border border-white/10 w-28 text-sm" />
           </div>
         </Row>
         <Row label="Unidad base de apuesta">
-          <input type="number" className="bg-black/40 rounded px-3 py-1.5 border border-white/10 w-28" value={rules.unit}
-            onChange={(e) => set('unit', Math.max(1, parseInt(e.target.value || '1', 10)))} />
+          <NumberInput value={rules.unit} min={1}
+            onCommit={(v) => set('unit', v)}
+            className="bg-black/40 rounded px-3 py-1.5 border border-white/10 w-28 text-sm" />
         </Row>
         <Row label="Estilo de apuesta">
           <div className="flex gap-2">
