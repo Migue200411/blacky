@@ -174,6 +174,8 @@ function updateActiveHand(round: RoundState, patch: Partial<PlayerHand>): RoundS
 
 // ─── Reducer ────────────────────────────────────────────────
 
+const MAX_BOXES = 3
+
 type Msg =
   | { type: 'PICK_CARD'; rank: Rank }
   | { type: 'BUCKET'; bucket: 'low' | 'neutral' | 'high' }
@@ -190,6 +192,7 @@ type Msg =
   | { type: 'SET_RULES'; rules: Partial<TableRules> }
   | { type: 'TOGGLE_ADVANCED_COUNT' }
   | { type: 'ADVANCE_TO_DEALER' }
+  | { type: 'SET_BOX_COUNT'; count: number }
 
 function reducer(state: FullState, msg: Msg): FullState {
   switch (msg.type) {
@@ -244,8 +247,11 @@ function reducer(state: FullState, msg: Msg): FullState {
       }
     case 'RESET':
       return { ...initial(), session: { ...initial().session, rules: state.session.rules } }
-    case 'SET_BET':
-      return { ...state, round: { ...state.round, currentBet: msg.bet } }
+    case 'SET_BET': {
+      const bet = msg.bet
+      const hands = state.round.hands.map((h) => (h.doubled ? h : { ...h, bet: bet ?? 0 }))
+      return { ...state, round: { ...state.round, currentBet: bet, hands } }
+    }
     case 'SET_RULES': {
       const rules = { ...state.session.rules, ...msg.rules }
       const initialDecks = 'decks' in msg.rules ? rules.decks : state.session.initialDecks
@@ -255,6 +261,25 @@ function reducer(state: FullState, msg: Msg): FullState {
       return { ...state, advancedCounting: !state.advancedCounting }
     case 'ADVANCE_TO_DEALER':
       return { ...state, step: 'WAITING_DEALER_FINAL_CARDS' }
+    case 'SET_BOX_COUNT': {
+      // Only allowed before dealing has started (no cards, no dealer up).
+      const notStarted =
+        !state.round.dealerUpcard &&
+        state.round.hands.every((h) => h.cards.length === 0) &&
+        state.round.hands.every((h) => !h.fromSplit)
+      if (!notStarted) return state
+      const desired = Math.max(1, Math.min(MAX_BOXES, msg.count))
+      const existing = state.round.hands
+      let hands: PlayerHand[]
+      if (desired > existing.length) {
+        hands = [...existing]
+        while (hands.length < desired) hands.push(newHand([], 0, { status: 'pending' }))
+      } else {
+        hands = existing.slice(0, desired)
+      }
+      hands = hands.map((h, i) => ({ ...h, status: i === 0 ? 'active' : 'pending' }))
+      return { ...state, round: { ...state.round, hands, activeHandIdx: 0 }, step: 'WAITING_PLAYER_FIRST_CARD' }
+    }
   }
 }
 
@@ -266,18 +291,30 @@ function handlePickCard(state: FullState, rank: Rank): FullState {
 
   switch (state.step) {
     case 'WAITING_PLAYER_FIRST_CARD': {
-      if (!active) return state
+      // Deal into the first hand that still has no card. When every hand has
+      // its first card, advance to the dealer upcard step.
+      const idx = round.hands.findIndex((h) => h.cards.length === 0)
+      if (idx === -1) return state
       const hands = round.hands.slice()
-      hands[round.activeHandIdx] = { ...active, cards: [card] }
-      return { ...state, round: { ...round, hands, undoStack }, step: 'WAITING_DEALER_UPCARD' }
+      hands[idx] = { ...hands[idx], cards: [card] }
+      const anyEmpty = hands.some((h) => h.cards.length === 0)
+      const nextStep: Step = anyEmpty ? 'WAITING_PLAYER_FIRST_CARD' : 'WAITING_DEALER_UPCARD'
+      return { ...state, round: { ...round, hands, undoStack }, step: nextStep }
     }
     case 'WAITING_DEALER_UPCARD':
       return { ...state, round: { ...round, dealerUpcard: card, undoStack }, step: 'WAITING_PLAYER_SECOND_CARD' }
     case 'WAITING_PLAYER_SECOND_CARD': {
-      if (!active) return state
+      const idx = round.hands.findIndex((h) => h.cards.length === 1)
+      if (idx === -1) return state
       const hands = round.hands.slice()
-      hands[round.activeHandIdx] = { ...active, cards: [...active.cards, card] }
-      return { ...state, round: { ...round, hands, undoStack }, step: 'SHOWING_RECOMMENDATION' }
+      hands[idx] = { ...hands[idx], cards: [...hands[idx].cards, card] }
+      const anyNeedsSecond = hands.some((h) => h.cards.length < 2)
+      if (anyNeedsSecond) {
+        return { ...state, round: { ...round, hands, undoStack }, step: 'WAITING_PLAYER_SECOND_CARD' }
+      }
+      // All hands have their 2 initial cards — mark first as active, rest pending.
+      const withStatus = hands.map((h, i) => ({ ...h, status: (i === 0 ? 'active' : 'pending') as HandStatus }))
+      return { ...state, round: { ...round, hands: withStatus, undoStack, activeHandIdx: 0 }, step: 'SHOWING_RECOMMENDATION' }
     }
     case 'WAITING_PLAYER_HIT_CARD': {
       if (!active) return state
@@ -425,21 +462,20 @@ function handleUndo(state: FullState): FullState {
   const lastId = stack[stack.length - 1]
   const round = removeCardById(state.round, lastId)
   round.undoStack = stack.slice(0, -1)
-  // Recompute step from resulting state.
-  const active = activeHand(round)
-  const totalHands = round.hands.length
-  let step = state.step
-  if (totalHands === 1) {
-    const h = active!
-    if (h.cards.length === 0 && !round.dealerUpcard) step = 'WAITING_PLAYER_FIRST_CARD'
-    else if (h.cards.length === 1 && !round.dealerUpcard) step = 'WAITING_DEALER_UPCARD'
-    else if (h.cards.length === 1 && round.dealerUpcard) step = 'WAITING_PLAYER_SECOND_CARD'
-    else if (h.cards.length >= 2 && round.dealerUpcard) step = 'SHOWING_RECOMMENDATION'
-  } else {
-    if (round.hands.some((h) => h.needsSecondCard)) step = 'WAITING_SPLIT_CARD'
-    else step = 'SHOWING_RECOMMENDATION'
-  }
-  return { ...state, round, step }
+  return { ...state, round, step: stepFromRound(round) }
+}
+
+function stepFromRound(round: RoundState): Step {
+  // If any split just produced hands that need their second card, resume there.
+  if (round.hands.some((h) => h.needsSecondCard)) return 'WAITING_SPLIT_CARD'
+  // Any hand missing its first card → we are in the multi-box first-card phase.
+  if (round.hands.some((h) => h.cards.length === 0)) return 'WAITING_PLAYER_FIRST_CARD'
+  // All hands have card #1 but dealer up not registered.
+  if (!round.dealerUpcard) return 'WAITING_DEALER_UPCARD'
+  // Dealer up registered, any hand still missing card #2.
+  if (round.hands.some((h) => h.cards.length === 1)) return 'WAITING_PLAYER_SECOND_CARD'
+  // All hands have their initial 2 cards → ready for actions.
+  return 'SHOWING_RECOMMENDATION'
 }
 
 function removeCardById(round: RoundState, id: string): RoundState {
@@ -728,23 +764,38 @@ export function AsistentePage() {
           />
           <button
             className="btn-ghost !py-0.5 !px-2 text-[11px]"
-            onClick={() => {
-              dispatch({ type: 'SET_BET', bet: nextBet.bet })
-              // Also assign to the current (first) hand.
-              if (round.hands[0]) {
-                round.hands[0].bet = nextBet.bet
-              }
-            }}
+            onClick={() => dispatch({ type: 'SET_BET', bet: nextBet.bet })}
           >
             Usar
           </button>
         </div>
       </section>
 
+      {/* Box selector — only visible before dealing starts */}
+      {canPickBoxes(round) && (
+        <section className="card-panel p-3 flex flex-wrap items-center gap-2 text-sm">
+          <div className="font-display text-chip-gold">Manos que juegas</div>
+          <div className="flex gap-1">
+            {[1, 2, 3].map((n) => (
+              <button
+                key={n}
+                onClick={() => dispatch({ type: 'SET_BOX_COUNT', count: n })}
+                className={`btn-ghost !py-1 !px-3 ${round.hands.length === n ? '!bg-chip-gold !text-neutral-900' : ''}`}
+              >
+                {n}
+              </button>
+            ))}
+          </div>
+          <div className="text-[11px] text-white/60 ml-auto">
+            Cada mano tiene su propia apuesta. La app te irá pidiendo carta por carta en orden.
+          </div>
+        </section>
+      )}
+
       {/* Step + player hands */}
       <section className="card-panel p-4 space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="font-display text-lg text-chip-gold">{STEP_TITLE[step]}</div>
+          <div className="font-display text-lg text-chip-gold">{dynamicStepTitle(step, round)}</div>
           <button className="btn-ghost !py-1 !px-2 text-xs" disabled={round.undoStack.length === 0} onClick={() => dispatch({ type: 'UNDO' })}>
             Deshacer
           </button>
@@ -1014,6 +1065,34 @@ function isCardPickingStep(step: Step): boolean {
     || step === 'WAITING_PLAYER_HIT_CARD'
     || step === 'WAITING_DOUBLE_CARD'
     || step === 'WAITING_SPLIT_CARD'
+}
+
+function canPickBoxes(round: RoundState): boolean {
+  // Only when no cards have been dealt yet in any hand and no dealer upcard.
+  return !round.dealerUpcard
+    && round.hands.every((h) => h.cards.length === 0 && !h.fromSplit)
+}
+
+function dynamicStepTitle(step: Step, round: RoundState): string {
+  if (round.hands.length <= 1) return STEP_TITLE[step]
+  switch (step) {
+    case 'WAITING_PLAYER_FIRST_CARD': {
+      const idx = round.hands.findIndex((h) => h.cards.length === 0)
+      return idx >= 0 ? `Primera carta de la Mano ${idx + 1}` : STEP_TITLE[step]
+    }
+    case 'WAITING_PLAYER_SECOND_CARD': {
+      const idx = round.hands.findIndex((h) => h.cards.length === 1)
+      return idx >= 0 ? `Segunda carta de la Mano ${idx + 1}` : STEP_TITLE[step]
+    }
+    case 'SHOWING_RECOMMENDATION':
+      return `Elige tu acción · Mano ${round.activeHandIdx + 1}`
+    case 'WAITING_PLAYER_HIT_CARD':
+      return `Carta para la Mano ${round.activeHandIdx + 1}`
+    case 'WAITING_DOUBLE_CARD':
+      return `Carta del doble · Mano ${round.activeHandIdx + 1}`
+    default:
+      return STEP_TITLE[step]
+  }
 }
 
 // ─── UI helpers ────────────────────────────────────────────────
