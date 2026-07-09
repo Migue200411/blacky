@@ -178,13 +178,27 @@ export function SimulatorPage({ examMode, onDecisionRecorded, onHandRecorded }: 
   return (
     <div className="space-y-4 max-w-4xl mx-auto">
       {!examMode && (
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div>
-            <h1 className="font-display text-3xl text-chip-gold">Simulador Automático</h1>
-            <p className="text-white/70 text-sm">La app reparte y calcula. Tú decides la jugada.</p>
+        <>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h1 className="font-display text-3xl text-chip-gold">Simulador Automático</h1>
+              <p className="text-white/70 text-sm">La app reparte y calcula. Tú decides la jugada.</p>
+            </div>
+            <Link to="/" className="btn-ghost">← Volver</Link>
           </div>
-          <Link to="/" className="btn-ghost">← Volver</Link>
-        </div>
+          <div className="rounded-lg border border-chip-gold/40 bg-chip-gold/5 text-xs text-white/85 px-3 py-2 flex flex-wrap items-center gap-x-3 gap-y-1">
+            <span>
+              <strong>Modo:</strong>{' '}
+              {rules.variant === 'american' ? 'Estadounidense' : 'Europeo'}
+            </span>
+            <span className="text-white/70">
+              {rules.variant === 'american'
+                ? 'Dealer con carta oculta.'
+                : `Dealer sin carta oculta inicial.${rules.enhc ? ' ENHC activo.' : ' OBBO (sólo apuesta original).'}`}
+            </span>
+            <Link to="/configuracion" className="ml-auto underline text-chip-gold">Cambiar</Link>
+          </div>
+        </>
       )}
 
       {/* Compact status strip */}

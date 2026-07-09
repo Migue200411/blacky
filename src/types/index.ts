@@ -16,6 +16,7 @@ export type Rounding = 'floor' | 'round' | 'truncate'
 export type DoubleRule = 'any' | '9-11' | '10-11' | 'none'
 export type SurrenderRule = 'none' | 'late' | 'early'
 export type Aggression = 'conservative' | 'moderate' | 'aggressive'
+export type BlackjackVariant = 'american' | 'european'
 
 export interface TableRules {
   decks: 1 | 2 | 4 | 6 | 8
@@ -37,6 +38,10 @@ export interface TableRules {
   rounding: Rounding
   aggression: Aggression
   betRamp: BetRampEntry[]
+  variant: BlackjackVariant
+  /** European No Hole Card: if dealer later completes blackjack, some tables
+   *  make the player also lose doubles and splits. Only meaningful when variant='european'. */
+  enhc: boolean
 }
 
 export interface BetRampEntry {

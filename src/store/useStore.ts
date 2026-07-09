@@ -122,6 +122,7 @@ export const useStore = create<AppState>()(
     }),
     {
       name: 'blackjack-trainer-pro',
+      version: 2,
       partialize: (s) => ({
         rules: s.rules,
         stats: s.stats,
@@ -129,7 +130,17 @@ export const useStore = create<AppState>()(
         helpMode: s.helpMode,
         soundOn: s.soundOn,
         hasSeenDisclaimer: s.hasSeenDisclaimer
-      })
+      }),
+      // Fill in any new fields users on older versions don't have.
+      merge: (persisted, current) => {
+        const p = (persisted as Partial<AppState>) ?? {}
+        return {
+          ...current,
+          ...p,
+          rules: { ...DEFAULT_RULES, ...(p.rules ?? {}) },
+          stats: p.stats ?? current.stats
+        }
+      }
     }
   )
 )

@@ -38,6 +38,38 @@ export function ConfigPage() {
       </div>
 
       <section className="card-panel p-4">
+        <div className="font-display text-lg mb-2">Tipo de mesa</div>
+
+        <Row label="Variante" hint="Cambia si el dealer recibe carta oculta al inicio.">
+          <div className="grid sm:grid-cols-2 gap-2">
+            <button
+              onClick={() => set('variant', 'american')}
+              className={`text-left p-3 rounded-lg border ${rules.variant === 'american' ? 'border-chip-gold bg-chip-gold/10' : 'border-white/10 hover:bg-white/5'}`}
+            >
+              <div className="font-semibold">Estadounidense</div>
+              <div className="text-[11px] text-white/60 mt-1">Dealer recibe carta oculta al inicio. Insurance disponible.</div>
+            </button>
+            <button
+              onClick={() => set('variant', 'european')}
+              className={`text-left p-3 rounded-lg border ${rules.variant === 'european' ? 'border-chip-gold bg-chip-gold/10' : 'border-white/10 hover:bg-white/5'}`}
+            >
+              <div className="font-semibold">Europeo</div>
+              <div className="text-[11px] text-white/60 mt-1">Dealer sólo recibe una carta al inicio. Roba después.</div>
+            </button>
+          </div>
+        </Row>
+
+        {rules.variant === 'european' && (
+          <Row label="ENHC (European No Hole Card)" hint="Si está activo, el jugador puede perder dobles y splits cuando el dealer completa blackjack. Si está desactivado (OBBO), solo se pierde la apuesta original.">
+            <div className="flex gap-2">
+              <button onClick={() => set('enhc', true)} className={`btn-ghost !py-1 !px-3 ${rules.enhc ? '!bg-chip-gold !text-neutral-900' : ''}`}>ENHC activo</button>
+              <button onClick={() => set('enhc', false)} className={`btn-ghost !py-1 !px-3 ${!rules.enhc ? '!bg-chip-gold !text-neutral-900' : ''}`}>OBBO (sólo original)</button>
+            </div>
+          </Row>
+        )}
+      </section>
+
+      <section className="card-panel p-4">
         <div className="font-display text-lg mb-2">Zapato y reglas</div>
 
         <Row label="Número de mazos">

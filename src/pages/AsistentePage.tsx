@@ -11,8 +11,9 @@ import type { Action, Card, Rank, TableRules } from '../types'
 const RANKS: Rank[] = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K']
 
 type Step =
-  | 'WAITING_PLAYER_CARDS'
+  | 'WAITING_PLAYER_FIRST_CARD'
   | 'WAITING_DEALER_UPCARD'
+  | 'WAITING_PLAYER_SECOND_CARD'
   | 'SHOWING_RECOMMENDATION'
   | 'WAITING_PLAYER_HIT_CARD'
   | 'WAITING_DOUBLE_CARD'
@@ -111,7 +112,7 @@ type Msg =
 function initial(): FullState {
   const rules: TableRules = { ...DEFAULT_RULES, betRamp: DEFAULT_BET_RAMP }
   return {
-    step: 'WAITING_PLAYER_CARDS',
+    step: 'WAITING_PLAYER_FIRST_CARD',
     session: {
       handNumber: 1,
       seenCards: [],
@@ -145,14 +146,17 @@ function reducer(state: FullState, msg: Msg): FullState {
       const card = makeCard(msg.rank, sourceForStep(state.step))
       const r = { ...state.round, undoStack: [...state.round.undoStack, card.id] }
       switch (state.step) {
-        case 'WAITING_PLAYER_CARDS': {
+        case 'WAITING_PLAYER_FIRST_CARD': {
           r.playerCards = [...r.playerCards, card]
-          const nextStep: Step = r.playerCards.length >= 2 ? 'WAITING_DEALER_UPCARD' : state.step
-          return { ...state, round: r, step: nextStep }
+          return { ...state, round: r, step: 'WAITING_DEALER_UPCARD' }
         }
         case 'WAITING_DEALER_UPCARD':
           r.dealerUpcard = card
+          return { ...state, round: r, step: 'WAITING_PLAYER_SECOND_CARD' }
+        case 'WAITING_PLAYER_SECOND_CARD': {
+          r.playerCards = [...r.playerCards, card]
           return { ...state, round: r, step: 'SHOWING_RECOMMENDATION' }
+        }
         case 'WAITING_PLAYER_HIT_CARD':
           r.playerCards = [...r.playerCards, card]
           return { ...state, round: r, step: 'SHOWING_RECOMMENDATION' }
@@ -201,11 +205,12 @@ function reducer(state: FullState, msg: Msg): FullState {
       const lastId = stack[stack.length - 1]
       const r = removeById(state.round, lastId)
       r.undoStack = stack.slice(0, -1)
-      // Adjust step backwards if we just emptied a bucket the step depended on.
+      // Adjust step backwards according to the new flow: 1st player → dealer up → 2nd player → rec.
       let step = state.step
-      if (state.step === 'WAITING_DEALER_UPCARD' && r.playerCards.length < 2) step = 'WAITING_PLAYER_CARDS'
-      if (state.step === 'SHOWING_RECOMMENDATION' && !r.dealerUpcard) step = 'WAITING_DEALER_UPCARD'
-      if (state.step === 'SHOWING_RECOMMENDATION' && r.playerCards.length < 2) step = 'WAITING_PLAYER_CARDS'
+      if (r.playerCards.length === 0 && !r.dealerUpcard) step = 'WAITING_PLAYER_FIRST_CARD'
+      else if (r.playerCards.length >= 1 && !r.dealerUpcard) step = 'WAITING_DEALER_UPCARD'
+      else if (r.playerCards.length === 1 && r.dealerUpcard) step = 'WAITING_PLAYER_SECOND_CARD'
+      else if (r.playerCards.length >= 2 && r.dealerUpcard) step = 'SHOWING_RECOMMENDATION'
       return { ...state, round: r, step }
     }
     case 'NEW_HAND': {
@@ -239,7 +244,7 @@ function reducer(state: FullState, msg: Msg): FullState {
           history: [...state.session.history, entry]
         },
         round: emptyRound(),
-        step: 'WAITING_PLAYER_CARDS'
+        step: 'WAITING_PLAYER_FIRST_CARD'
       }
     }
     case 'NEW_SHOE':
@@ -247,7 +252,7 @@ function reducer(state: FullState, msg: Msg): FullState {
         ...state,
         session: { ...state.session, seenCards: [], handNumber: 1 },
         round: emptyRound(),
-        step: 'WAITING_PLAYER_CARDS'
+        step: 'WAITING_PLAYER_FIRST_CARD'
       }
     case 'RESET':
       return initial()
@@ -266,7 +271,12 @@ function reducer(state: FullState, msg: Msg): FullState {
 }
 
 function sourceForStep(step: Step): BucketSource {
-  if (step === 'WAITING_PLAYER_CARDS' || step === 'WAITING_PLAYER_HIT_CARD' || step === 'WAITING_DOUBLE_CARD') return 'player'
+  if (
+    step === 'WAITING_PLAYER_FIRST_CARD'
+    || step === 'WAITING_PLAYER_SECOND_CARD'
+    || step === 'WAITING_PLAYER_HIT_CARD'
+    || step === 'WAITING_DOUBLE_CARD'
+  ) return 'player'
   if (step === 'WAITING_DEALER_UPCARD') return 'dealerUp'
   if (step === 'WAITING_DEALER_FINAL_CARDS') return 'dealerFinal'
   return 'otherExact'
@@ -363,8 +373,9 @@ function isPairEligible(ranks: Rank[]): boolean {
 // ─── Step labels ────────────────────────────────────────────────
 
 const STEP_TITLE: Record<Step, string> = {
-  WAITING_PLAYER_CARDS: 'Selecciona tus 2 cartas',
+  WAITING_PLAYER_FIRST_CARD: 'Selecciona tu primera carta',
   WAITING_DEALER_UPCARD: 'Selecciona la carta visible del dealer',
+  WAITING_PLAYER_SECOND_CARD: 'Selecciona tu segunda carta',
   SHOWING_RECOMMENDATION: 'Elige tu acción',
   WAITING_PLAYER_HIT_CARD: 'Selecciona la carta que recibiste',
   WAITING_DOUBLE_CARD: 'Selecciona la carta del double',
@@ -421,8 +432,17 @@ export function AsistentePage() {
         <Link to="/" className="btn-ghost">← Volver</Link>
       </div>
 
-      <div className="rounded-lg border border-chip-gold/40 bg-chip-gold/5 text-xs text-white/85 px-3 py-2">
-        Práctica educativa y simulación. No usar en casinos reales.
+      <div className="rounded-lg border border-chip-gold/40 bg-chip-gold/5 text-xs text-white/85 px-3 py-2 flex flex-wrap items-center gap-x-3 gap-y-1">
+        <span>
+          <strong>Modo:</strong>{' '}
+          {session.rules.variant === 'american' ? 'Estadounidense' : 'Europeo'}
+        </span>
+        <span className="text-white/70">
+          {session.rules.variant === 'american'
+            ? 'Dealer con carta oculta.'
+            : 'Dealer sin carta oculta inicial.'}
+        </span>
+        <span className="ml-auto text-white/60">Práctica educativa. No usar en casinos reales.</span>
       </div>
 
       {/* Estado de sesión */}
@@ -637,6 +657,42 @@ export function AsistentePage() {
           <section className="card-panel p-4 space-y-2 text-sm">
             <div className="font-display text-lg text-chip-gold">Reglas de mesa</div>
             <div className="grid grid-cols-2 gap-2 text-xs">
+              <label className="flex justify-between items-center col-span-2">
+                Variante
+                <div className="flex gap-1">
+                  <button
+                    className={`btn-ghost !py-0.5 !px-2 !text-[11px] ${session.rules.variant === 'american' ? '!bg-chip-gold !text-neutral-900' : ''}`}
+                    onClick={() => dispatch({ type: 'SET_RULES', rules: { variant: 'american' } })}
+                  >
+                    Estadounidense
+                  </button>
+                  <button
+                    className={`btn-ghost !py-0.5 !px-2 !text-[11px] ${session.rules.variant === 'european' ? '!bg-chip-gold !text-neutral-900' : ''}`}
+                    onClick={() => dispatch({ type: 'SET_RULES', rules: { variant: 'european' } })}
+                  >
+                    Europeo
+                  </button>
+                </div>
+              </label>
+              {session.rules.variant === 'european' && (
+                <label className="flex justify-between items-center col-span-2">
+                  ENHC
+                  <div className="flex gap-1">
+                    <button
+                      className={`btn-ghost !py-0.5 !px-2 !text-[11px] ${session.rules.enhc ? '!bg-chip-gold !text-neutral-900' : ''}`}
+                      onClick={() => dispatch({ type: 'SET_RULES', rules: { enhc: true } })}
+                    >
+                      Activo
+                    </button>
+                    <button
+                      className={`btn-ghost !py-0.5 !px-2 !text-[11px] ${!session.rules.enhc ? '!bg-chip-gold !text-neutral-900' : ''}`}
+                      onClick={() => dispatch({ type: 'SET_RULES', rules: { enhc: false } })}
+                    >
+                      OBBO
+                    </button>
+                  </div>
+                </label>
+              )}
               <label className="flex justify-between items-center">
                 Mazos
                 <select
@@ -709,8 +765,9 @@ export function AsistentePage() {
 }
 
 function isCardPickingStep(step: Step): boolean {
-  return step === 'WAITING_PLAYER_CARDS'
+  return step === 'WAITING_PLAYER_FIRST_CARD'
     || step === 'WAITING_DEALER_UPCARD'
+    || step === 'WAITING_PLAYER_SECOND_CARD'
     || step === 'WAITING_PLAYER_HIT_CARD'
     || step === 'WAITING_DOUBLE_CARD'
     || step === 'WAITING_DEALER_FINAL_CARDS'

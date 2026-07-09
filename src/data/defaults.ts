@@ -28,7 +28,9 @@ export const DEFAULT_RULES: TableRules = {
   countingSystem: 'HiLo',
   rounding: 'floor',
   aggression: 'moderate',
-  betRamp: DEFAULT_BET_RAMP
+  betRamp: DEFAULT_BET_RAMP,
+  variant: 'american',
+  enhc: true
 }
 
 export const EMPTY_STATS: UserStats = {

@@ -64,38 +64,61 @@ export function startRound(state: GameState, bet: number): GameState {
   const clampedBet = Math.max(s.rules.minBet, Math.min(s.rules.maxBet, Math.min(bet, s.bankroll)))
   s = { ...s, bet: clampedBet, phase: 'dealing', hands: [], insuranceTaken: false, insuranceCost: 0, splitsSoFar: 0, lastRoundNet: 0 }
 
-  // Deal player, dealer, player, dealer(hidden)
+  const isEuropean = s.rules.variant === 'european'
+  const cardsToDeal = isEuropean ? 3 : 4
   const drawn: Card[] = []
-  for (let i = 0; i < 4; i++) {
+  for (let i = 0; i < cardsToDeal; i++) {
     const r = drawAndCount(s)
     s = r.state
     drawn.push(r.card)
   }
-  // Only the visible dealer card should count for the count on the initial deal;
-  // the hidden card is not revealed yet, so we roll back its contribution.
-  const holeCard = drawn[3]
-  const rollback = updateRunningCount(0, holeCard, s.rules.countingSystem)
-  s = { ...s, runningCount: s.runningCount - rollback }
 
   const playerCards = [drawn[0], drawn[2]]
-  const dealerCards = [drawn[1], holeCard]
+  let dealerCards: Card[]
+  let holeHidden: boolean
+  let dealerBJ: boolean
+
+  if (isEuropean) {
+    // European: dealer receives only the visible upcard. No hole is dealt.
+    dealerCards = [drawn[1]]
+    holeHidden = false
+    dealerBJ = false // Dealer cannot have BJ yet — only 1 card.
+  } else {
+    // American: dealer gets an upcard + a hidden hole card. Roll back the hole's
+    // contribution to the running count; it re-adds when revealed.
+    const holeCard = drawn[3]
+    const rollback = updateRunningCount(0, holeCard, s.rules.countingSystem)
+    s = { ...s, runningCount: s.runningCount - rollback }
+    dealerCards = [drawn[1], holeCard]
+    holeHidden = true
+    dealerBJ = handTotal(dealerCards).isBlackjack
+  }
+
   const player = newHand(playerCards, clampedBet)
   const dealer: DealerState = {
     cards: dealerCards,
-    holeHidden: true,
+    holeHidden,
     finished: false,
     busted: false,
-    blackjack: handTotal(dealerCards).isBlackjack
+    blackjack: dealerBJ
   }
 
   s = { ...s, hands: [player], activeHandIdx: 0, dealer, bankroll: s.bankroll - clampedBet }
 
-  // Determine next phase
-  const dealerShowsAce = dealerCards[0].rank === 'A'
-  if (dealerShowsAce && s.rules.insurance) {
-    return { ...s, phase: 'insurance' }
+  // Insurance is only offered in american tables when dealer shows an Ace.
+  if (!isEuropean) {
+    const dealerShowsAce = dealerCards[0].rank === 'A'
+    if (dealerShowsAce && s.rules.insurance) {
+      return { ...s, phase: 'insurance' }
+    }
+    return handleBlackjackCheck(s)
   }
-  return handleBlackjackCheck(s)
+
+  // European: player blackjack still resolves immediately (dealer has no hole to peek).
+  if (player.blackjack) {
+    return revealAndSettle(s)
+  }
+  return { ...s, phase: 'playerTurn' }
 }
 
 function revealHoleAndAddCount(state: GameState): GameState {
@@ -243,7 +266,10 @@ function startDealerTurn(state: GameState): GameState {
     const r = drawAndCount(s); s = r.state; cards.push(r.card)
   }
   const dt = handTotal(cards)
-  const finalDealer: DealerState = { cards, holeHidden: false, finished: true, busted: dt.isBust, blackjack: false }
+  // A natural blackjack drawn out by the dealer only occurs in European tables
+  // (in American we would have flagged it at startRound and never reached here).
+  const isBJ = cards.length === 2 && dt.value === 21
+  const finalDealer: DealerState = { cards, holeHidden: false, finished: true, busted: dt.isBust, blackjack: isBJ }
   return revealAndSettle({ ...s, dealer: finalDealer })
 }
 
@@ -275,6 +301,15 @@ function revealAndSettle(state: GameState): GameState {
       return { ...h, result: 'blackjack' as HandResult, payout: pay }
     }
     if (dealerBJ && !h.blackjack) {
+      // European OBBO (non-ENHC): only the original wager is lost; any extra
+      // bet from doubling is refunded. Splits are already independent hands so
+      // each pays original-only from its own perspective.
+      const isEuroOBBO = state.rules.variant === 'european' && !state.rules.enhc
+      if (isEuroOBBO && h.doubled) {
+        const originalBet = h.bet / 2
+        net += originalBet
+        return { ...h, result: 'lose' as HandResult, payout: originalBet }
+      }
       return { ...h, result: 'lose' as HandResult, payout: 0 }
     }
     if (dealerBJ && h.blackjack) {
