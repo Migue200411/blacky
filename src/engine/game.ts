@@ -29,7 +29,7 @@ export interface GameState {
 }
 
 export function initGame(rules: TableRules): GameState {
-  const shoe = buildShoe(rules.decks, rules.penetration)
+  const shoe = buildShoe(rules.decks, rules.penetration, rules.burnCards)
   return {
     rules,
     shoe,
@@ -55,7 +55,7 @@ function drawAndCount(state: GameState): { card: Card; state: GameState } {
 
 export function reshuffleIfNeeded(state: GameState): GameState {
   if (!state.shoe.needsShuffle) return state
-  const shoe = buildShoe(state.rules.decks, state.rules.penetration)
+  const shoe = buildShoe(state.rules.decks, state.rules.penetration, state.rules.burnCards)
   return { ...state, shoe, runningCount: 0, message: 'Nuevo zapato barajado.' }
 }
 
@@ -351,7 +351,7 @@ export function nextRound(state: GameState): GameState {
 
 /** Force a brand-new shoe: reshuffle and reset the running count, preserving bankroll and rules. */
 export function forceNewShoe(state: GameState): GameState {
-  const shoe = buildShoe(state.rules.decks, state.rules.penetration)
+  const shoe = buildShoe(state.rules.decks, state.rules.penetration, state.rules.burnCards)
   return {
     ...state,
     shoe,

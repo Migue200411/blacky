@@ -17,12 +17,17 @@ export type DoubleRule = 'any' | '9-11' | '10-11' | 'none'
 export type SurrenderRule = 'none' | 'late' | 'early'
 export type Aggression = 'conservative' | 'moderate' | 'aggressive'
 export type BlackjackVariant = 'american' | 'european'
+export type ShuffleType = 'shoe' | 'csm'
+export type BlackjackPayout = '3:2' | '6:5' | '1:1'
 
 export interface TableRules {
   decks: 1 | 2 | 4 | 6 | 8
-  penetration: 0.5 | 0.6 | 0.65 | 0.75 | 0.8 | 0.85
+  penetration: number
   dealerHitsSoft17: boolean
-  blackjackPayout: '3:2' | '6:5'
+  blackjackPayout: BlackjackPayout
+  shuffleType: ShuffleType
+  burnCards: number
+  maxSplitHands: number
   doubleRule: DoubleRule
   doubleAfterSplit: boolean
   surrender: SurrenderRule

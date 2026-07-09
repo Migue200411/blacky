@@ -44,8 +44,8 @@ function canSurrender(hand: HandState, rules: TableRules): boolean {
 
 function canSplit(hand: HandState, rules: TableRules, splitsSoFar: number): boolean {
   if (!isPair(hand.cards)) return false
-  // Hard cap: max 4 hands = 3 splits total.
-  if (splitsSoFar >= 3) return false
+  const maxSplits = Math.max(1, rules.maxSplitHands) - 1
+  if (splitsSoFar >= maxSplits) return false
   // If re-split disabled, only the first split is allowed.
   if (splitsSoFar >= 1 && !rules.resplit) return false
   // Aces re-split is usually a separate rule.

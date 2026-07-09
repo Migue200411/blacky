@@ -5,7 +5,7 @@ const SUITS: Suit[] = ['♠', '♥', '♦', '♣']
 
 let cardCounter = 0
 
-export function buildShoe(decks: number, penetration: number): ShoeState {
+export function buildShoe(decks: number, penetration: number, burnCards: number = 0): ShoeState {
   const cards: Card[] = []
   for (let d = 0; d < decks; d++) {
     for (const s of SUITS) {
@@ -15,6 +15,9 @@ export function buildShoe(decks: number, penetration: number): ShoeState {
     }
   }
   shuffle(cards)
+  // Burn the top N cards face-down (not counted, not shown).
+  const burn = Math.max(0, Math.min(burnCards | 0, cards.length - 1))
+  for (let i = 0; i < burn; i++) cards.pop()
   const cutIndex = Math.floor(cards.length * (1 - penetration))
   return { cards, played: [], decks, cutIndex, needsShuffle: false }
 }

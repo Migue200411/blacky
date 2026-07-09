@@ -86,17 +86,63 @@ export function ConfigPage() {
           </div>
         </Row>
 
-        <Row label="Penetración" hint="Qué porcentaje del zapato se juega antes de barajar.">
-          <div className="flex flex-wrap gap-2">
-            {[0.5, 0.6, 0.65, 0.75, 0.8, 0.85].map((p) => (
+        <Row label="Barajado" hint="Zapato clásico permite conteo. CSM (máquina continua) desactiva el conteo.">
+          <div className="flex gap-2">
+            <button onClick={() => set('shuffleType', 'shoe')} className={`btn-ghost ${rules.shuffleType === 'shoe' ? '!bg-chip-gold !text-neutral-900' : ''}`}>Zapato clásico</button>
+            <button onClick={() => set('shuffleType', 'csm')} className={`btn-ghost ${rules.shuffleType === 'csm' ? '!bg-chip-gold !text-neutral-900' : ''}`}>CSM (continua)</button>
+          </div>
+        </Row>
+
+        <Row label="Penetración" hint="Porcentaje del zapato antes de barajar. Sólo aplica a zapatos clásicos.">
+          <div className="flex flex-wrap items-center gap-2">
+            {[0.5, 0.6, 0.7, 0.75, 0.8, 0.85].map((p) => (
               <button
                 key={p}
-                onClick={() => set('penetration', p as TableRules['penetration'])}
+                onClick={() => set('penetration', p)}
+                disabled={rules.shuffleType === 'csm'}
                 className={`btn-ghost !py-1 !px-3 ${rules.penetration === p ? '!bg-chip-gold !text-neutral-900' : ''}`}
               >
                 {Math.round(p * 100)}%
               </button>
             ))}
+            <label className="text-xs flex items-center gap-1">
+              <span className="text-white/60">Personalizada</span>
+              <input
+                type="number"
+                min={10}
+                max={95}
+                step={5}
+                disabled={rules.shuffleType === 'csm'}
+                value={Math.round(rules.penetration * 100)}
+                onChange={(e) => {
+                  const v = Math.max(10, Math.min(95, parseInt(e.target.value || '75', 10)))
+                  set('penetration', v / 100)
+                }}
+                className="bg-black/40 rounded px-2 py-0.5 border border-white/10 w-16"
+              />%
+            </label>
+          </div>
+        </Row>
+
+        <Row label="Cartas quemadas" hint="Cartas iniciales del zapato que el dealer descarta sin mostrar. No cuentan.">
+          <div className="flex gap-2">
+            {[0, 1, 5].map((n) => (
+              <button
+                key={n}
+                onClick={() => set('burnCards', n)}
+                className={`btn-ghost !py-1 !px-3 ${rules.burnCards === n ? '!bg-chip-gold !text-neutral-900' : ''}`}
+              >
+                {n}
+              </button>
+            ))}
+            <input
+              type="number"
+              min={0}
+              max={52}
+              value={rules.burnCards}
+              onChange={(e) => set('burnCards', Math.max(0, Math.min(52, parseInt(e.target.value || '0', 10))))}
+              className="bg-black/40 rounded px-2 py-0.5 border border-white/10 w-16"
+            />
           </div>
         </Row>
 
@@ -107,11 +153,16 @@ export function ConfigPage() {
           </div>
         </Row>
 
-        <Row label="Pago blackjack" hint="3:2 es favorable, 6:5 muy desfavorable.">
-          <div className="flex gap-2">
-            {(['3:2', '6:5'] as const).map((p) => (
+        <Row label="Pago blackjack" hint="3:2 es favorable, 6:5 desfavorable, 1:1 muy malo (evítalo).">
+          <div className="flex gap-2 items-center">
+            {(['3:2', '6:5', '1:1'] as const).map((p) => (
               <button key={p} onClick={() => set('blackjackPayout', p)} className={`btn-ghost ${rules.blackjackPayout === p ? '!bg-chip-gold !text-neutral-900' : ''}`}>{p}</button>
             ))}
+            {rules.blackjackPayout !== '3:2' && (
+              <span className="text-[11px] text-chip-red">
+                Mesa desfavorable. Prefiere 3:2 si es posible.
+              </span>
+            )}
           </div>
         </Row>
 
@@ -141,7 +192,22 @@ export function ConfigPage() {
 
         <Row label="Re-split"><Toggle value={rules.resplit} onChange={(v) => set('resplit', v)} /></Row>
         <Row label="Re-split aces"><Toggle value={rules.resplitAces} onChange={(v) => set('resplitAces', v)} /></Row>
-        <Row label="Hit split aces"><Toggle value={rules.hitSplitAces} onChange={(v) => set('hitSplitAces', v)} /></Row>
+        <Row label="Hit split aces" hint="Si está desactivado, los ases divididos reciben solo una carta.">
+          <Toggle value={rules.hitSplitAces} onChange={(v) => set('hitSplitAces', v)} />
+        </Row>
+        <Row label="Máximo de manos por split" hint="Casino típico: 4 manos (3 splits). Algunos permiten 2 o 3.">
+          <div className="flex gap-2">
+            {[2, 3, 4].map((n) => (
+              <button
+                key={n}
+                onClick={() => set('maxSplitHands', n)}
+                className={`btn-ghost !py-1 !px-3 ${rules.maxSplitHands === n ? '!bg-chip-gold !text-neutral-900' : ''}`}
+              >
+                {n}
+              </button>
+            ))}
+          </div>
+        </Row>
         <Row label="Insurance"><Toggle value={rules.insurance} onChange={(v) => set('insurance', v)} /></Row>
       </section>
 
