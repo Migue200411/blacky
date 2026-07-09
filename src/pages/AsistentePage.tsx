@@ -1,4 +1,4 @@
-import { useMemo, useReducer, useState } from 'react'
+import { useEffect, useMemo, useReducer, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { PlayingCard } from '../components/PlayingCard'
 import { getRecommendedAction } from '../engine/recommendation'
@@ -605,10 +605,17 @@ const STEP_TITLE: Record<Step, string> = {
   HAND_FINISHED: 'Mano finalizada'
 }
 
+// Session-lived cache: state survives navigation within the same tab and only
+// resets when the page is reloaded (module scope is per-load).
+let cachedState: FullState | null = null
+
 // ─── Component ────────────────────────────────────────────────
 
 export function AsistentePage() {
-  const [state, dispatch] = useReducer(reducer, undefined, initial)
+  const [state, dispatch] = useReducer(reducer, undefined, () => cachedState ?? initial())
+  useEffect(() => {
+    cachedState = state
+  }, [state])
   const [showRulesPanel, setShowRulesPanel] = useState(false)
   const [showExplanation, setShowExplanation] = useState(false)
   const [showCount, setShowCount] = useState(true)
