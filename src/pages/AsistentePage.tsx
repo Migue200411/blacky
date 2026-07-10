@@ -92,11 +92,17 @@ interface RoundState {
   currentBet: number | null
 }
 
+type AssistantMode = 'auto' | 'manual'
+
 interface FullState {
   step: Step
   session: SessionState
   round: RoundState
   advancedCounting: boolean
+  assistantMode: AssistantMode
+  /** If true, in auto mode the recommendation auto-advances after a short delay
+   *  instead of waiting for the user to press "Entendido, continuar". */
+  autoAdvance: boolean
 }
 
 // ─── State helpers ────────────────────────────────────────────
@@ -156,7 +162,9 @@ function initial(): FullState {
       rules
     },
     round: emptyRound(),
-    advancedCounting: false
+    advancedCounting: false,
+    assistantMode: 'auto',
+    autoAdvance: false
   }
 }
 
@@ -193,6 +201,9 @@ type Msg =
   | { type: 'TOGGLE_ADVANCED_COUNT' }
   | { type: 'ADVANCE_TO_DEALER' }
   | { type: 'SET_BOX_COUNT'; count: number }
+  | { type: 'SET_ASSISTANT_MODE'; mode: AssistantMode }
+  | { type: 'SET_AUTO_ADVANCE'; value: boolean }
+  | { type: 'AUTO_RESOLVE' }
 
 function reducer(state: FullState, msg: Msg): FullState {
   switch (msg.type) {
@@ -261,6 +272,14 @@ function reducer(state: FullState, msg: Msg): FullState {
       return { ...state, advancedCounting: !state.advancedCounting }
     case 'ADVANCE_TO_DEALER':
       return { ...state, step: 'WAITING_DEALER_FINAL_CARDS' }
+    case 'SET_ASSISTANT_MODE':
+      return { ...state, assistantMode: msg.mode }
+    case 'SET_AUTO_ADVANCE':
+      return { ...state, autoAdvance: msg.value }
+    case 'AUTO_RESOLVE': {
+      const hands = autoResolveHands(state.round, state.session.rules)
+      return { ...state, round: { ...state.round, hands }, step: 'HAND_FINISHED' }
+    }
     case 'SET_BOX_COUNT': {
       // Only allowed before dealing has started (no cards, no dealer up).
       const notStarted =
@@ -432,9 +451,20 @@ function handleAction(state: FullState, action: 'H' | 'S' | 'D' | 'P' | 'R'): Fu
       const isAces = c1.rank === 'A'
       // Enforce max hands per split.
       if (round.hands.length >= rules.maxSplitHands) return state
+      const isEuropean = rules.variant === 'european'
       const hands = round.hands.slice()
-      const handA = newHand([c1], active.bet, { fromSplit: true, isSplitAces: isAces, needsSecondCard: true, status: 'active' })
-      const handB = newHand([c2], active.bet, { fromSplit: true, isSplitAces: isAces, needsSecondCard: true, status: 'pending' })
+      const handA = newHand([c1], active.bet, {
+        fromSplit: true, isSplitAces: isAces,
+        needsSecondCard: true,
+        status: 'active'
+      })
+      const handB = newHand([c2], active.bet, {
+        fromSplit: true, isSplitAces: isAces,
+        // European: hand B only gets its second card AFTER hand A finishes.
+        // American: both hands receive their second card immediately.
+        needsSecondCard: !isEuropean,
+        status: 'pending'
+      })
       hands.splice(round.activeHandIdx, 1, handA, handB)
       return {
         ...state,
@@ -448,7 +478,12 @@ function handleAction(state: FullState, action: 'H' | 'S' | 'D' | 'P' | 'R'): Fu
 function advanceActive(hands: PlayerHand[], fromIdx: number): { idx: number; step: Step } {
   for (let i = fromIdx + 1; i < hands.length; i++) {
     if (hands[i].status === 'pending' || hands[i].status === 'active') {
-      // Mark as active
+      // European split: the next hand may still have only 1 card. It receives
+      // its second card now (that's the timing that distinguishes Euro from US).
+      if (hands[i].cards.length === 1) {
+        hands[i] = { ...hands[i], status: 'active', needsSecondCard: true }
+        return { idx: i, step: 'WAITING_SPLIT_CARD' }
+      }
       hands[i] = { ...hands[i], status: 'active' }
       return { idx: i, step: 'SHOWING_RECOMMENDATION' }
     }
@@ -472,8 +507,10 @@ function stepFromRound(round: RoundState): Step {
   if (round.hands.some((h) => h.cards.length === 0)) return 'WAITING_PLAYER_FIRST_CARD'
   // All hands have card #1 but dealer up not registered.
   if (!round.dealerUpcard) return 'WAITING_DEALER_UPCARD'
-  // Dealer up registered, any hand still missing card #2.
-  if (round.hands.some((h) => h.cards.length === 1)) return 'WAITING_PLAYER_SECOND_CARD'
+  // Dealer up registered, an INITIAL hand (not from split) still missing card #2.
+  // Note: a from-split hand with 1 card in European mode is waiting its turn,
+  // not blocking the flow. Ignore those here.
+  if (round.hands.some((h) => h.cards.length === 1 && !h.fromSplit)) return 'WAITING_PLAYER_SECOND_CARD'
   // All hands have their initial 2 cards → ready for actions.
   return 'SHOWING_RECOMMENDATION'
 }
@@ -581,6 +618,44 @@ function decksRemainingBeforeRound(state: FullState): number {
   return Math.max(0.25, (total - state.session.seenCards.length - state.session.rules.burnCards) / 52)
 }
 
+function dealerShouldStand(dealerCards: Registered[], h17: boolean): boolean {
+  if (dealerCards.length < 2) return false
+  const ranks = dealerCards.map((c) => c.rank!).filter(Boolean) as Rank[]
+  if (ranks.length < 2) return false
+  const total = handTotalValue(ranks)
+  if (total > 21) return true
+  if (total >= 18) return true
+  if (total === 17) return !(h17 && handIsSoft(ranks))
+  return false
+}
+
+function autoResolveHands(round: RoundState, rules: TableRules): PlayerHand[] {
+  const dealerCards = [
+    ...(round.dealerUpcard ? [round.dealerUpcard] : []),
+    ...round.dealerFinalCards
+  ]
+  const dealerRanks = dealerCards.map((c) => c.rank!).filter(Boolean) as Rank[]
+  const dealerTotal = dealerRanks.length ? handTotalValue(dealerRanks) : 0
+  const dealerBust = dealerTotal > 21
+  const dealerBJ = dealerCards.length === 2 && dealerTotal === 21
+
+  return round.hands.map((h) => {
+    if (h.result) return h
+    if (h.status === 'busted') return h
+    if (h.status === 'surrendered') return h
+    const pRanks = h.cards.map((c) => c.rank!).filter(Boolean) as Rank[]
+    const pTotal = pRanks.length ? handTotalValue(pRanks) : 0
+    const pBJ = h.cards.length === 2 && pTotal === 21 && !h.fromSplit
+    if (pBJ && !dealerBJ) return { ...h, status: 'done' as HandStatus, result: 'blackjack' as HandResult }
+    if (pBJ && dealerBJ) return { ...h, status: 'done' as HandStatus, result: 'push' as HandResult }
+    if (!pBJ && dealerBJ) return { ...h, status: 'done' as HandStatus, result: 'lose' as HandResult }
+    if (dealerBust) return { ...h, status: 'done' as HandStatus, result: 'win' as HandResult }
+    if (pTotal > dealerTotal) return { ...h, status: 'done' as HandStatus, result: 'win' as HandResult }
+    if (pTotal < dealerTotal) return { ...h, status: 'done' as HandStatus, result: 'lose' as HandResult }
+    return { ...h, status: 'done' as HandStatus, result: 'push' as HandResult }
+  })
+}
+
 function handBankrollDelta(h: PlayerHand, rules: TableRules): number {
   const baseBet = h.doubled ? h.bet / 2 : h.bet
   const totalBet = h.bet
@@ -657,7 +732,7 @@ export function AsistentePage() {
   const [showCount, setShowCount] = useState(true)
   const [historyOpen, setHistoryOpen] = useState<number | null>(null)
 
-  const { session, round, step, advancedCounting } = state
+  const { session, round, step, advancedCounting, assistantMode } = state
   const isCsm = session.rules.shuffleType === 'csm'
   const rc = runningCountValue(state)
   const decks = decksRemaining(state)
@@ -693,6 +768,69 @@ export function AsistentePage() {
     [session.rules, tc, session.bankroll]
   )
 
+  // Effective action to apply when the user acknowledges the recommendation.
+  const resolvedAutoAction = useMemo<'H' | 'S' | 'D' | 'P' | 'R' | null>(() => {
+    if (!recommendation) return null
+    const a = recommendation.adjustedAction
+    if (a === 'I') return null
+    if (a === 'P' && !canPlayerSplit) {
+      const basic = recommendation.basicAction
+      if (basic === 'P' || basic === 'I') return null
+      return basic as 'H' | 'S' | 'D' | 'R'
+    }
+    return a as 'H' | 'S' | 'D' | 'P' | 'R'
+  }, [recommendation, canPlayerSplit])
+
+  function confirmAutoAction() {
+    if (!resolvedAutoAction) return
+    dispatch({ type: 'ACTION', action: resolvedAutoAction })
+  }
+
+  // AUTO MODE + autoAdvance ON: apply the recommendation after ~1.5s so the
+  // user can read it. When autoAdvance is OFF (default), we wait for the user
+  // to press "Entendido, continuar".
+  useEffect(() => {
+    if (assistantMode !== 'auto') return
+    if (!state.autoAdvance) return
+    if (step !== 'SHOWING_RECOMMENDATION') return
+    if (!resolvedAutoAction) return
+    const t = setTimeout(() => {
+      dispatch({ type: 'ACTION', action: resolvedAutoAction })
+    }, 1500)
+    return () => clearTimeout(t)
+  }, [assistantMode, state.autoAdvance, step, resolvedAutoAction])
+
+  // AUTO MODE: resolve the round automatically when the dealer stands or busts.
+  useEffect(() => {
+    if (assistantMode !== 'auto') return
+    if (step !== 'WAITING_DEALER_FINAL_CARDS') return
+    const dealerCards = [
+      ...(round.dealerUpcard ? [round.dealerUpcard] : []),
+      ...round.dealerFinalCards
+    ]
+    // If every remaining hand is settled without needing dealer, resolve now.
+    const anyLive = round.hands.some((h) => h.status === 'active' || (h.status === 'done' && !h.result) || (h.status === 'pending'))
+    const anyToSettle = round.hands.some((h) => !h.result)
+    if (!anyToSettle) {
+      dispatch({ type: 'AUTO_RESOLVE' })
+      return
+    }
+    // If all live hands are busted or surrendered, dealer doesn't need to play.
+    const allBustedOrSurrendered = round.hands.every(
+      (h) => h.status === 'busted' || h.status === 'surrendered' || !!h.result
+    )
+    if (allBustedOrSurrendered) {
+      dispatch({ type: 'AUTO_RESOLVE' })
+      return
+    }
+    // Otherwise wait for dealer to stand.
+    if (dealerCards.length >= 2 && dealerShouldStand(dealerCards, session.rules.dealerHitsSoft17)) {
+      dispatch({ type: 'AUTO_RESOLVE' })
+    }
+    // Silence unused warning by referencing anyLive.
+    void anyLive
+  }, [assistantMode, step, round.dealerUpcard, round.dealerFinalCards, round.hands, session.rules.dealerHitsSoft17])
+
   const cardsSeen = session.seenCards.length + allRoundCards(round).length
   const totalCards = session.initialDecks * 52
 
@@ -717,6 +855,36 @@ export function AsistentePage() {
         <button onClick={() => setShowRulesPanel((v) => !v)} className="ml-auto btn-ghost !py-0.5 !px-2 text-[11px]">
           {showRulesPanel ? 'Ocultar configuración' : 'Configuración de mesa'}
         </button>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2 text-xs">
+        <span className="text-white/70">Modo asistente:</span>
+        <button
+          onClick={() => dispatch({ type: 'SET_ASSISTANT_MODE', mode: 'auto' })}
+          className={`btn-ghost !py-1 !px-3 ${assistantMode === 'auto' ? '!bg-chip-gold !text-neutral-900' : ''}`}
+        >
+          Automático guiado
+        </button>
+        <button
+          onClick={() => dispatch({ type: 'SET_ASSISTANT_MODE', mode: 'manual' })}
+          className={`btn-ghost !py-1 !px-3 ${assistantMode === 'manual' ? '!bg-chip-gold !text-neutral-900' : ''}`}
+        >
+          Manual completo
+        </button>
+        {assistantMode === 'auto' && (
+          <label className="flex items-center gap-1 ml-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={state.autoAdvance}
+              onChange={(e) => dispatch({ type: 'SET_AUTO_ADVANCE', value: e.target.checked })}
+              className="accent-chip-gold"
+            />
+            Avanzar automáticamente
+          </label>
+        )}
+        {assistantMode === 'auto' && (
+          <span className="text-[11px] text-white/60">Muestra la recomendación y espera tu confirmación.</span>
+        )}
       </div>
 
       {showRulesPanel && (
@@ -858,116 +1026,178 @@ export function AsistentePage() {
 
         {step === 'SHOWING_RECOMMENDATION' && recommendation && (
           <>
-            <div className="rounded-lg border border-chip-gold/40 bg-chip-gold/5 p-3 space-y-1">
-              <div className="text-sm">
-                <span className="text-white/60">Recomendación (Mano {round.activeHandIdx + 1}):</span>{' '}
-                <strong className="text-chip-gold text-lg">{labelAction(recommendation.adjustedAction)}</strong>
-                {recommendation.hasDeviation && !isCsm && <span className="ml-2 text-[11px]">desviación TC ≥ {recommendation.deviationIndex}</span>}
+            {assistantMode === 'auto' ? (
+              <RecommendationCard
+                recommendation={recommendation}
+                resolvedAction={resolvedAutoAction}
+                tc={tc}
+                isCsm={isCsm}
+                playerTotal={activeTotal}
+                playerSoft={activeSoft}
+                dealerUp={round.dealerUpcard?.rank ?? '?'}
+                handIndex={round.activeHandIdx}
+                totalHands={round.hands.length}
+                showExplanation={showExplanation}
+                onToggleExplanation={() => setShowExplanation((v) => !v)}
+                onConfirm={confirmAutoAction}
+                autoAdvance={state.autoAdvance}
+              />
+            ) : (
+              <div className="rounded-lg border border-chip-gold/40 bg-chip-gold/5 p-3 space-y-1">
+                <div className="text-sm">
+                  <span className="text-white/60">Recomendación (Mano {round.activeHandIdx + 1}):</span>{' '}
+                  <strong className="text-chip-gold text-lg">{labelAction(recommendation.adjustedAction)}</strong>
+                  {recommendation.hasDeviation && !isCsm && <span className="ml-2 text-[11px]">desviación TC ≥ {recommendation.deviationIndex}</span>}
+                </div>
+                <div className="text-[11px] text-white/70">
+                  Básica: {labelAction(recommendation.basicAction)}
+                  {!isCsm && ` · TC actual ${fmt(tc)}`}
+                  {isCsm && ' · CSM: solo estrategia básica'}
+                </div>
+                {showExplanation && (
+                  <div className="text-xs text-white/80 border-t border-white/10 pt-2">{recommendation.explanation}</div>
+                )}
+                <button className="text-[11px] underline text-white/60" onClick={() => setShowExplanation((v) => !v)}>
+                  {showExplanation ? 'Ocultar explicación' : 'Ver explicación completa'}
+                </button>
               </div>
-              <div className="text-[11px] text-white/70">
-                Básica: {labelAction(recommendation.basicAction)}
-                {!isCsm && ` · TC actual ${fmt(tc)}`}
-                {isCsm && ' · CSM: solo estrategia básica'}
-              </div>
-              {showExplanation && (
-                <div className="text-xs text-white/80 border-t border-white/10 pt-2">{recommendation.explanation}</div>
-              )}
-              <button className="text-[11px] underline text-white/60" onClick={() => setShowExplanation((v) => !v)}>
-                {showExplanation ? 'Ocultar explicación' : 'Ver explicación completa'}
-              </button>
-            </div>
+            )}
 
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-              <ActionButton label="Pedí carta" onClick={() => dispatch({ type: 'ACTION', action: 'H' })} disabled={activeH?.isSplitAces && !session.rules.hitSplitAces} />
-              <ActionButton label="Me planté" onClick={() => dispatch({ type: 'ACTION', action: 'S' })} tone="secondary" />
-              <ActionButton
-                label="Doblé"
-                onClick={() => dispatch({ type: 'ACTION', action: 'D' })}
-                tone="primary"
-                disabled={activeH?.cards.length !== 2 || (activeH?.fromSplit && !session.rules.doubleAfterSplit) || session.rules.doubleRule === 'none'}
-              />
-              {canPlayerSplit && (
-                <ActionButton
-                  label="Dividí"
-                  onClick={() => dispatch({ type: 'ACTION', action: 'P' })}
-                  tone="primary"
-                />
-              )}
-              {session.rules.surrender !== 'none' && !activeH?.fromSplit && activeH?.cards.length === 2 && (
-                <ActionButton label="Me rendí" onClick={() => dispatch({ type: 'ACTION', action: 'R' })} tone="danger" />
-              )}
-            </div>
+            {assistantMode === 'manual' && (
+              <>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  <ActionButton label="Pedí carta" onClick={() => dispatch({ type: 'ACTION', action: 'H' })} disabled={activeH?.isSplitAces && !session.rules.hitSplitAces} />
+                  <ActionButton label="Me planté" onClick={() => dispatch({ type: 'ACTION', action: 'S' })} tone="secondary" />
+                  <ActionButton
+                    label="Doblé"
+                    onClick={() => dispatch({ type: 'ACTION', action: 'D' })}
+                    tone="primary"
+                    disabled={activeH?.cards.length !== 2 || (activeH?.fromSplit && !session.rules.doubleAfterSplit) || session.rules.doubleRule === 'none'}
+                  />
+                  {canPlayerSplit && (
+                    <ActionButton
+                      label="Dividí"
+                      onClick={() => dispatch({ type: 'ACTION', action: 'P' })}
+                      tone="primary"
+                    />
+                  )}
+                  {session.rules.surrender !== 'none' && !activeH?.fromSplit && activeH?.cards.length === 2 && (
+                    <ActionButton label="Me rendí" onClick={() => dispatch({ type: 'ACTION', action: 'R' })} tone="danger" />
+                  )}
+                </div>
 
-            <div className="border-t border-white/10 pt-3 grid grid-cols-2 sm:grid-cols-4 gap-2">
-              <ActionButton
-                label={round.hands.length > 1 ? 'Todas ganaron' : 'Gané'}
-                onClick={() => dispatch({ type: 'RESULT_ALL_WIN' })}
-                tone="secondary"
-              />
-              <ActionButton
-                label={round.hands.length > 1 ? 'Todas perdieron' : 'Perdí'}
-                onClick={() => dispatch({ type: 'RESULT_ALL_LOSE' })}
-                tone="danger"
-              />
-              <ActionButton
-                label="Empate"
-                onClick={() => dispatch({ type: round.hands.length > 1 ? 'RESULT_ACTIVE' : 'RESULT_ALL_PUSH', result: 'push' } as Msg)}
-                tone="ghost"
-              />
-              <ActionButton label="Blackjack" onClick={() => dispatch({ type: 'RESULT_ACTIVE', result: 'blackjack' })} tone="primary" />
-            </div>
+                <div className="border-t border-white/10 pt-3 grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  <ActionButton
+                    label={round.hands.length > 1 ? 'Todas ganaron' : 'Gané'}
+                    onClick={() => dispatch({ type: 'RESULT_ALL_WIN' })}
+                    tone="secondary"
+                  />
+                  <ActionButton
+                    label={round.hands.length > 1 ? 'Todas perdieron' : 'Perdí'}
+                    onClick={() => dispatch({ type: 'RESULT_ALL_LOSE' })}
+                    tone="danger"
+                  />
+                  <ActionButton
+                    label="Empate"
+                    onClick={() => dispatch({ type: round.hands.length > 1 ? 'RESULT_ACTIVE' : 'RESULT_ALL_PUSH', result: 'push' } as Msg)}
+                    tone="ghost"
+                  />
+                  <ActionButton label="Blackjack" onClick={() => dispatch({ type: 'RESULT_ACTIVE', result: 'blackjack' })} tone="primary" />
+                </div>
+              </>
+            )}
           </>
         )}
 
         {step === 'WAITING_DEALER_FINAL_CARDS' && (
           <>
-            <div className="text-xs text-white/60">Registra las cartas del dealer al descubrirlas. Cuando termines, marca el resultado.</div>
+            <div className="text-xs text-white/60">Registra las cartas del dealer al descubrirlas.</div>
             <RankPicker onPick={(r) => dispatch({ type: 'PICK_CARD', rank: r })} />
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-              <ActionButton label="Gané" onClick={() => dispatch({ type: 'RESULT_ALL_WIN' })} tone="secondary" />
-              <ActionButton label="Dealer se pasó" onClick={() => dispatch({ type: 'RESULT_ALL_WIN' })} tone="primary" />
-              <ActionButton label="Empate" onClick={() => dispatch({ type: 'RESULT_ALL_PUSH' })} tone="ghost" />
-              <ActionButton label="Perdí" onClick={() => dispatch({ type: 'RESULT_ALL_LOSE' })} tone="danger" />
-            </div>
-            <div className="text-[11px] text-white/60">
-              Si tuviste manos con resultados distintos (por split), usa los botones de resultado en el turno de cada mano.
-            </div>
+            <DealerStatus
+              upcard={round.dealerUpcard}
+              finalCards={round.dealerFinalCards}
+              h17={session.rules.dealerHitsSoft17}
+            />
+            {assistantMode === 'manual' && (
+              <>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  <ActionButton label="Gané" onClick={() => dispatch({ type: 'RESULT_ALL_WIN' })} tone="secondary" />
+                  <ActionButton label="Dealer se pasó" onClick={() => dispatch({ type: 'RESULT_ALL_WIN' })} tone="primary" />
+                  <ActionButton label="Empate" onClick={() => dispatch({ type: 'RESULT_ALL_PUSH' })} tone="ghost" />
+                  <ActionButton label="Perdí" onClick={() => dispatch({ type: 'RESULT_ALL_LOSE' })} tone="danger" />
+                </div>
+                <div className="text-[11px] text-white/60">
+                  Si tuviste manos con resultados distintos (por split), usa los botones de resultado en el turno de cada mano.
+                </div>
+              </>
+            )}
+            {assistantMode === 'auto' && (
+              <div className="text-[11px] text-white/60">
+                Cuando el dealer se plante o se pase, la app resuelve automáticamente.
+              </div>
+            )}
           </>
         )}
 
-        {step === 'HAND_FINISHED' && (
-          <div className="space-y-2">
-            <div className="rounded-lg border border-white/10 bg-white/5 p-3 space-y-1 text-sm">
-              <div className="font-semibold">Resumen de la mano:</div>
-              {round.hands.map((h, i) => {
-                const delta = handBankrollDelta(h, session.rules)
-                return (
-                  <div key={h.id} className="flex justify-between text-xs">
-                    <span>Mano {i + 1}: {h.cards.map((c) => c.rank).join(' ')} → {resultLabel(h.result)}</span>
-                    <span className={delta > 0 ? 'text-emerald-400' : delta < 0 ? 'text-chip-red' : 'text-white/70'}>
-                      {delta >= 0 ? '+' : ''}${delta.toFixed(0)}
-                    </span>
+        {step === 'HAND_FINISHED' && (() => {
+          const netTotal = round.hands.reduce((s, h) => s + handBankrollDelta(h, session.rules), 0)
+          const dealerCards = [
+            ...(round.dealerUpcard ? [round.dealerUpcard] : []),
+            ...round.dealerFinalCards
+          ]
+          const dealerRanks = dealerCards.map((c) => c.rank!).filter(Boolean) as Rank[]
+          const dealerTotal = dealerRanks.length ? handTotalValue(dealerRanks) : 0
+          const primaryLabel = summarizeOutcome(round.hands)
+          return (
+            <div className="space-y-3">
+              <div className={`rounded-lg border p-4 space-y-1 text-center ${
+                netTotal > 0 ? 'border-emerald-400/60 bg-emerald-400/10'
+                : netTotal < 0 ? 'border-chip-red/60 bg-chip-red/10'
+                : 'border-white/20 bg-white/5'
+              }`}>
+                <div className="text-3xl font-display text-chip-gold">{primaryLabel}</div>
+                <div className={`text-2xl font-display tabular-nums ${netTotal > 0 ? 'text-emerald-400' : netTotal < 0 ? 'text-chip-red' : 'text-white/70'}`}>
+                  {netTotal >= 0 ? '+' : ''}${netTotal.toFixed(0)}
+                </div>
+                {dealerTotal > 0 && (
+                  <div className="text-xs text-white/70">Dealer: {dealerTotal}{dealerTotal > 21 ? ' (bust)' : ''}</div>
+                )}
+              </div>
+              <div className="rounded-lg border border-white/10 bg-white/5 p-3 space-y-1 text-xs">
+                {round.hands.map((h, i) => {
+                  const delta = handBankrollDelta(h, session.rules)
+                  const total = handTotalValue(h.cards.map((c) => c.rank!).filter(Boolean) as Rank[])
+                  return (
+                    <div key={h.id} className="flex justify-between">
+                      <span>
+                        Mano {i + 1}: {h.cards.map((c) => c.rank).join(' ')} = {total}
+                        {' → '}{resultLabel(h.result)}
+                        {h.doubled && ' (D)'}
+                        {h.fromSplit && ' (split)'}
+                        {' · '}
+                        <span className="text-white/50">acción: {handActionLabel(h)}</span>
+                      </span>
+                      <span className={delta > 0 ? 'text-emerald-400' : delta < 0 ? 'text-chip-red' : 'text-white/70'}>
+                        {delta >= 0 ? '+' : ''}${delta.toFixed(0)}
+                      </span>
+                    </div>
+                  )
+                })}
+                {!isCsm && (
+                  <div className="border-t border-white/10 pt-1 text-white/60">
+                    RC: {fmt(rc)} · TC: {fmt(tc)}
                   </div>
-                )
-              })}
-              <div className="border-t border-white/10 pt-1 flex justify-between font-semibold">
-                <span>Neto</span>
-                <span className={`tabular-nums ${round.hands.reduce((s, h) => s + handBankrollDelta(h, session.rules), 0) > 0 ? 'text-emerald-400' : 'text-chip-red'}`}>
-                  {(() => {
-                    const n = round.hands.reduce((s, h) => s + handBankrollDelta(h, session.rules), 0)
-                    return `${n >= 0 ? '+' : ''}$${n.toFixed(0)}`
-                  })()}
-                </span>
+                )}
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <button className="btn-primary" onClick={() => dispatch({ type: 'NEW_HAND' })}>Nueva mano</button>
+                <button className="btn-ghost" onClick={() => confirm('Nuevo zapato: reinicia el conteo. ¿Continuar?') && dispatch({ type: 'NEW_SHOE' })}>
+                  Nuevo zapato
+                </button>
               </div>
             </div>
-            <div className="grid grid-cols-2 gap-2">
-              <button className="btn-primary" onClick={() => dispatch({ type: 'NEW_HAND' })}>Nueva mano</button>
-              <button className="btn-ghost" onClick={() => confirm('Nuevo zapato: reinicia el conteo. ¿Continuar?') && dispatch({ type: 'NEW_SHOE' })}>
-                Nuevo zapato
-              </button>
-            </div>
-          </div>
-        )}
+          )
+        })()}
       </section>
 
       {/* Other players quick counting */}
@@ -1113,6 +1343,182 @@ function RankPicker({ onPick }: { onPick: (r: Rank) => void }) {
   )
 }
 
+// ─── Recommendation card (auto mode) ──────────────────────────
+
+const ACTION_HEADLINE: Record<'H' | 'S' | 'D' | 'P' | 'R', string> = {
+  H: 'Pedir carta',
+  S: 'Plantarte',
+  D: 'Doblar',
+  P: 'Dividir',
+  R: 'Rendirse'
+}
+
+const ACTION_REASON: Record<'H' | 'S' | 'D' | 'P' | 'R', string> = {
+  H: 'Tu mano todavía necesita mejorar y plantarte tendría peor expectativa en esta situación.',
+  S: 'Tu mano tiene más valor manteniéndose como está que arriesgarse a pasarse.',
+  D: 'La situación es favorable para aumentar la apuesta y recibir una sola carta adicional.',
+  P: 'Jugar estas cartas como dos manos separadas tiene mejor expectativa que jugarlas juntas.',
+  R: 'Esta mano tiene muy mala expectativa frente a la carta del dealer. Perder media apuesta es mejor que jugar la mano completa.'
+}
+
+const NEXT_STEP_TEXT: Record<'H' | 'S' | 'D' | 'P' | 'R', string> = {
+  H: 'Selecciona la carta que recibiste.',
+  S: 'Ahora registra las cartas finales del dealer.',
+  D: 'Selecciona la única carta que recibiste al doblar.',
+  P: 'Registra las cartas de cada mano dividida.',
+  R: 'La mano se cerrará automáticamente como rendición.'
+}
+
+interface RecommendationCardProps {
+  recommendation: {
+    basicAction: Action
+    adjustedAction: Action
+    hasDeviation: boolean
+    deviationIndex?: number
+    explanation: string
+    insurance: { shouldTake: boolean; reason: string } | null
+  }
+  resolvedAction: 'H' | 'S' | 'D' | 'P' | 'R' | null
+  tc: number
+  isCsm: boolean
+  playerTotal: number
+  playerSoft: boolean
+  dealerUp: string
+  handIndex: number
+  totalHands: number
+  showExplanation: boolean
+  onToggleExplanation: () => void
+  onConfirm: () => void
+  autoAdvance: boolean
+}
+
+function RecommendationCard(props: RecommendationCardProps) {
+  const {
+    recommendation, resolvedAction, tc, isCsm,
+    playerTotal, playerSoft, dealerUp, handIndex, totalHands,
+    showExplanation, onToggleExplanation, onConfirm, autoAdvance
+  } = props
+  const [expanded, setExpanded] = useState(false)
+  const a = resolvedAction
+  if (!a) {
+    return (
+      <div className="rounded-lg border border-white/20 bg-white/5 p-3 text-sm">
+        Situación sin acción automática (posible insurance). Usa el modo manual para decidir.
+      </div>
+    )
+  }
+  const deviation = recommendation.hasDeviation && recommendation.basicAction !== recommendation.adjustedAction && !isCsm
+
+  return (
+    <div className="rounded-lg border-2 border-chip-gold bg-chip-gold/10 p-2.5 space-y-2">
+      {/* Compact header: action + continue */}
+      <div className="flex items-center gap-2">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-baseline gap-1.5 flex-wrap">
+            <span className="text-[10px] uppercase tracking-wider text-chip-gold whitespace-nowrap">
+              Rec{totalHands > 1 ? ` · M${handIndex + 1}` : ''}:
+            </span>
+            <span className="font-display text-xl text-chip-gold leading-none">{ACTION_HEADLINE[a]}</span>
+            {deviation && (
+              <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-chip-red text-white font-semibold whitespace-nowrap">por conteo</span>
+            )}
+          </div>
+          <div className="text-[11px] text-white/70 mt-0.5 truncate">
+            Ahora: {NEXT_STEP_TEXT[a]}
+          </div>
+        </div>
+        <button
+          className="btn-primary !py-2 !px-3 text-sm whitespace-nowrap"
+          onClick={onConfirm}
+        >
+          Continuar
+        </button>
+      </div>
+
+      <button
+        onClick={() => setExpanded((v) => !v)}
+        className="text-[11px] text-white/60 underline"
+      >
+        {expanded ? 'Ocultar detalle' : 'Ver detalle'}
+      </button>
+
+      {expanded && (
+        <div className="space-y-2 border-t border-white/10 pt-2">
+          {deviation ? (
+            <div className="rounded bg-chip-red/10 border border-chip-red/40 p-2 text-[11px] space-y-0.5">
+              <div>Básica: <strong>{labelAction(recommendation.basicAction)}</strong> · TC <strong>{fmt(tc)}</strong> → <strong className="text-chip-gold">{labelAction(recommendation.adjustedAction)}</strong>{recommendation.deviationIndex !== undefined && (
+                <span className="text-white/60"> (índice ≥ {recommendation.deviationIndex})</span>
+              )}</div>
+            </div>
+          ) : (
+            !isCsm && (
+              <div className="text-[11px] text-white/60">Sin desviación. Se usa estrategia básica.{tc !== 0 && ` TC ${fmt(tc)}.`}</div>
+            )
+          )}
+
+          <div className="text-xs text-white/85">
+            <span className="text-white/60">Por qué: </span>{ACTION_REASON[a]}
+          </div>
+
+          <div className="grid grid-cols-2 gap-1 text-[11px] text-white/70">
+            <div>Mano: <strong>{playerTotal}{playerSoft ? ' soft' : ''}</strong> vs <strong>{dealerUp}</strong></div>
+            <div>Básica / Aj: <strong>{recommendation.basicAction}</strong> / <strong>{recommendation.adjustedAction}</strong></div>
+            {!isCsm && <div>TC: <strong>{fmt(tc)}</strong></div>}
+            {recommendation.insurance && (
+              <div className="col-span-2 text-chip-gold">
+                Seguro: {recommendation.insurance.shouldTake ? 'Sí' : 'No'} — {recommendation.insurance.reason}
+              </div>
+            )}
+          </div>
+
+          {showExplanation && (
+            <div className="text-[11px] text-white/80 border-t border-white/10 pt-1">
+              {recommendation.explanation}
+            </div>
+          )}
+          <button className="text-[10px] underline text-white/60" onClick={onToggleExplanation}>
+            {showExplanation ? 'Ocultar explicación larga' : 'Ver explicación larga'}
+          </button>
+        </div>
+      )}
+
+      {autoAdvance && (
+        <div className="text-[10px] text-chip-gold text-center">Avanzando en ~1.5s (o pulsa Continuar)</div>
+      )}
+    </div>
+  )
+}
+
+function DealerStatus({ upcard, finalCards, h17 }: { upcard: Registered | null; finalCards: Registered[]; h17: boolean }) {
+  const cards = [...(upcard ? [upcard] : []), ...finalCards]
+  const ranks = cards.map((c) => c.rank!).filter(Boolean) as Rank[]
+  if (ranks.length < 2) {
+    return (
+      <div className="text-xs text-white/60">
+        Registra al menos la carta oculta del dealer.
+      </div>
+    )
+  }
+  const total = handTotalValue(ranks)
+  const soft = handIsSoft(ranks)
+  const busted = total > 21
+  const stands = dealerShouldStand(cards, h17)
+  return (
+    <div className={`rounded-lg border p-2 text-sm flex flex-wrap items-center gap-3 ${busted ? 'border-emerald-400/40 bg-emerald-400/10' : stands ? 'border-chip-gold/40 bg-chip-gold/5' : 'border-white/10 bg-black/30'}`}>
+      <span>
+        Dealer: <strong>{total}{soft && total <= 21 ? ' (soft)' : ''}</strong>
+      </span>
+      {busted ? (
+        <span className="text-emerald-400 font-semibold">Dealer se pasó</span>
+      ) : stands ? (
+        <span className="text-chip-gold font-semibold">El dealer se planta</span>
+      ) : (
+        <span className="text-white/70">El dealer debe pedir</span>
+      )}
+    </div>
+  )
+}
+
 function ActionButton({ label, onClick, tone = 'secondary', disabled }: { label: string; onClick: () => void; tone?: 'primary' | 'secondary' | 'ghost' | 'danger'; disabled?: boolean }) {
   const cls = tone === 'primary' ? 'btn-primary' : tone === 'ghost' ? 'btn-ghost' : tone === 'danger' ? 'btn-danger' : 'btn-secondary'
   return (
@@ -1155,6 +1561,32 @@ function labelAction(a: Action): string {
 function resultLabel(r: HandResult | null): string {
   if (!r) return '—'
   return { win: 'Ganó', lose: 'Perdió', push: 'Empate', blackjack: 'Blackjack', surrender: 'Rendido', bust: 'Bust' }[r]
+}
+
+function summarizeOutcome(hands: PlayerHand[]): string {
+  const wins = hands.filter((h) => h.result === 'win' || h.result === 'blackjack').length
+  const losses = hands.filter((h) => h.result === 'lose' || h.result === 'bust' || h.result === 'surrender').length
+  const pushes = hands.filter((h) => h.result === 'push').length
+  const total = wins + losses + pushes
+  if (total === 0) return 'Mano terminada'
+  if (hands.length === 1) {
+    if (wins) return hands[0].result === 'blackjack' ? '¡Blackjack!' : 'Ganaste'
+    if (pushes) return 'Empataste'
+    return 'Perdiste'
+  }
+  if (wins === total) return '¡Ganaste todas!'
+  if (losses === total) return 'Perdiste todas'
+  if (pushes === total) return 'Empataste todas'
+  return `${wins} ganó · ${pushes} empate · ${losses} perdió`
+}
+
+function handActionLabel(h: PlayerHand): string {
+  if (h.result === 'surrender') return 'Rendirse'
+  if (h.doubled) return 'Doblar'
+  if (h.fromSplit && h.cards.length === 2) return 'Split (plantada)'
+  if (h.status === 'busted') return 'Pedir → bust'
+  if (h.cards.length > 2) return 'Pedir → plantarse'
+  return 'Plantarse'
 }
 
 function countBucket(state: FullState, bucket: 'low' | 'neutral' | 'high'): number {
